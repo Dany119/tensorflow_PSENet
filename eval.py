@@ -7,19 +7,18 @@ import tensorflow as tf
 from tensorflow.python.client import timeline
 from utils.utils_tool import logger, cfg
 import matplotlib.pyplot as plt
+import model
 
-tf.app.flags.DEFINE_string('test_data_path', None, '')
-tf.app.flags.DEFINE_string('gpu_list', '0', '')
-tf.app.flags.DEFINE_string('checkpoint_path', './', '')
-tf.app.flags.DEFINE_string('output_dir', './results/', '')
-tf.app.flags.DEFINE_bool('no_write_images', False, 'do not write images')
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-from nets import model
-from pse import pse
 
-FLAGS = tf.app.flags.FLAGS
-
+test_data_path = '/Users/apple/PycharmProjects/design/venvnew/Data/demo/'
+checkpoint_path = './resnet_train/'
+output_dir = './results/'
+no_write_images = False
 logger.setLevel(cfg.debug)
+
 
 def get_images():
     '''
@@ -28,7 +27,7 @@ def get_images():
     '''
     files = []
     exts = ['jpg', 'png', 'jpeg', 'JPG']
-    for parent, dirnames, filenames in os.walk(FLAGS.test_data_path):
+    for parent, dirnames, filenames in os.walk(test_data_path):
         for filename in filenames:
             for ext in exts:
                 if filename.endswith(ext):
@@ -110,6 +109,7 @@ def detect(seg_maps, timer, image_w, image_h, min_area_thresh=10, seg_map_thresh
 
     return np.array(boxes), kernals, timer
 
+
 def show_score_geo(color_im, kernels, im_res):
     fig = plt.figure()
     cmap = plt.cm.hot
@@ -149,87 +149,77 @@ def show_score_geo(color_im, kernels, im_res):
     fig.show()
 
 
-def main(argv=None):
-    import os
-    os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpu_list
 
-    try:
-        os.makedirs(FLAGS.output_dir)
-    except OSError as e:
-        if e.errno != 17:
-            raise
+try:
+    os.makedirs(output_dir)
+except OSError as e:
+    if e.errno != 17:
+        raise
 
-    with tf.get_default_graph().as_default():
-        input_images = tf.placeholder(tf.float32, shape=[None, None, None, 3], name='input_images')
-        global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
-        seg_maps_pred = model.model(input_images, is_training=False)
+global_step = tf.Variable([0], trainable=False, name='global_step')
+psenet = model.PSEnet().model
 
-        variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
-        saver = tf.train.Saver(variable_averages.variables_to_restore())
-        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
-            ckpt_state = tf.train.get_checkpoint_state(FLAGS.checkpoint_path)
-            model_path = os.path.join(FLAGS.checkpoint_path, os.path.basename(ckpt_state.model_checkpoint_path))
-            logger.info('Restore from {}'.format(model_path))
-            saver.restore(sess, model_path)
+variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
+logger.info('Restore from {}'.format(checkpoint_path))
+psenet.load_weights(checkpoint_path)
 
-            im_fn_list = get_images()
-            for im_fn in im_fn_list:
-                im = cv2.imread(im_fn)[:, :, ::-1]
-                logger.debug('image file:{}'.format(im_fn))
+im_fn_list = get_images()
+for im_fn in im_fn_list:
+    im = cv2.imread(im_fn)[:, :, ::-1]
+    logger.debug('image file:{}'.format(im_fn))
 
-                start_time = time.time()
-                im_resized, (ratio_h, ratio_w) = resize_image(im)
-                h, w, _ = im_resized.shape
-                # options = tf.RunOptions(trace_level = tf.RunOptions.FULL_TRACE)
-                # run_metadata = tf.RunMetadata()
-                timer = {'net': 0, 'pse': 0}
-                start = time.time()
-                seg_maps = sess.run(seg_maps_pred, feed_dict={input_images: [im_resized]})
-                timer['net'] = time.time() - start
-                # fetched_timeline = timeline.Timeline(run_metadata.step_stats)
-                # chrome_trace = fetched_timeline.generate_chrome_trace_format()
-                # with open(os.path.join(FLAGS.output_dir, os.path.basename(im_fn).split('.')[0]+'.json'), 'w') as f:
-                #     f.write(chrome_trace)
+    start_time = time.time()
+    im_resized, (ratio_h, ratio_w) = resize_image(im)
+    h, w, _ = im_resized.shape
+    im_resized = tf.cast(im_resized, dtype=tf.float32)
+    # options = tf.RunOptions(trace_level = tf.RunOptions.FULL_TRACE)
+    # run_metadata = tf.RunMetadata()
+    timer = {'net': 0, 'pse': 0}
+    start = time.time()
+    seg_maps = psenet(im_resized)
+    timer['net'] = time.time() - start
+    # fetched_timeline = timeline.Timeline(run_metadata.step_stats)
+    # chrome_trace = fetched_timeline.generate_chrome_trace_format()
+    # with open(os.path.join(FLAGS.output_dir, os.path.basename(im_fn).split('.')[0]+'.json'), 'w') as f:
+    #     f.write(chrome_trace)
 
-                boxes, kernels, timer = detect(seg_maps=seg_maps, timer=timer, image_w=w, image_h=h)
-                logger.info('{} : net {:.0f}ms, pse {:.0f}ms'.format(
-                    im_fn, timer['net']*1000, timer['pse']*1000))
+    boxes, kernels, timer = detect(seg_maps=seg_maps, timer=timer, image_w=w, image_h=h)
+    logger.info('{} : net {:.0f}ms, pse {:.0f}ms'.format(
+        im_fn, timer['net']*1000, timer['pse']*1000))
 
-                if boxes is not None:
-                    boxes = boxes.reshape((-1, 4, 2))
-                    boxes[:, :, 0] /= ratio_w
-                    boxes[:, :, 1] /= ratio_h
-                    h, w, _ = im.shape
-                    boxes[:, :, 0] = np.clip(boxes[:, :, 0], 0, w)
-                    boxes[:, :, 1] = np.clip(boxes[:, :, 1], 0, h)
+    if boxes is not None:
+        boxes = boxes.reshape((-1, 4, 2))
+        boxes[:, :, 0] /= ratio_w
+        boxes[:, :, 1] /= ratio_h
+        h, w, _ = im.shape
+        boxes[:, :, 0] = np.clip(boxes[:, :, 0], 0, w)
+        boxes[:, :, 1] = np.clip(boxes[:, :, 1], 0, h)
 
-                duration = time.time() - start_time
-                logger.info('[timing] {}'.format(duration))
+    duration = time.time() - start_time
+    logger.info('[timing] {}'.format(duration))
 
-                # save to file
-                if boxes is not None:
-                    res_file = os.path.join(
-                        FLAGS.output_dir,
-                        '{}.txt'.format(os.path.splitext(
-                            os.path.basename(im_fn))[0]))
+    # save to file
+    if boxes is not None:
+        res_file = os.path.join(
+            FLAGS.output_dir,
+            '{}.txt'.format(os.path.splitext(
+                os.path.basename(im_fn))[0]))
 
+        with open(res_file, 'w') as f:
+            num =0
+            for i in xrange(len(boxes)):
+                # to avoid submitting errors
+                box = boxes[i]
+                if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
+                    continue
 
-                    with open(res_file, 'w') as f:
-                        num =0
-                        for i in xrange(len(boxes)):
-                            # to avoid submitting errors
-                            box = boxes[i]
-                            if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
-                                continue
+                num += 1
 
-                            num += 1
+                f.write('{},{},{},{},{},{},{},{}\r\n'.format(
+                    box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1]))
+                cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=(255, 255, 0), thickness=2)
+    if not no_write_images:
+        img_path = os.path.join(output_dir, os.path.basename(im_fn))
+        cv2.imwrite(img_path, im[:, :, ::-1])
+    # show_score_geo(im_resized, kernels, im)
 
-                            f.write('{},{},{},{},{},{},{},{}\r\n'.format(
-                                box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1]))
-                            cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=(255, 255, 0), thickness=2)
-                if not FLAGS.no_write_images:
-                    img_path = os.path.join(FLAGS.output_dir, os.path.basename(im_fn))
-                    cv2.imwrite(img_path, im[:, :, ::-1])
-                # show_score_geo(im_resized, kernels, im)
-if __name__ == '__main__':
-    tf.app.run()
