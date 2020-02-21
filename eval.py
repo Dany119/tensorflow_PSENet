@@ -8,13 +8,14 @@ from tensorflow.python.client import timeline
 from utils.utils_tool import logger, cfg
 import matplotlib.pyplot as plt
 import model
+from pse import pse
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 
 test_data_path = '/Users/apple/PycharmProjects/design/venvnew/Data/demo/'
-checkpoint_path = './resnet_train/'
+checkpoint_path = '/Users/apple/PycharmProjects/design/venvnew/PSEnet_Code/resnet_train/'
 output_dir = './results/'
 no_write_images = False
 logger.setLevel(cfg.debug)
@@ -150,16 +151,9 @@ def show_score_geo(color_im, kernels, im_res):
 
 
 
-try:
-    os.makedirs(output_dir)
-except OSError as e:
-    if e.errno != 17:
-        raise
-
 global_step = tf.Variable([0], trainable=False, name='global_step')
 psenet = model.PSEnet().model
 
-variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
 logger.info('Restore from {}'.format(checkpoint_path))
 psenet.load_weights(checkpoint_path)
 
@@ -176,6 +170,8 @@ for im_fn in im_fn_list:
     # run_metadata = tf.RunMetadata()
     timer = {'net': 0, 'pse': 0}
     start = time.time()
+    im_resized = tf.cast([im_resized], dtype=tf.float32)
+    im_resized = model.mean_image_subtraction(im_resized)
     seg_maps = psenet(im_resized)
     timer['net'] = time.time() - start
     # fetched_timeline = timeline.Timeline(run_metadata.step_stats)
